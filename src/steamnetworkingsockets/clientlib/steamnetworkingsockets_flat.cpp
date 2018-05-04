@@ -195,4 +195,41 @@ STEAMNETWORKINGSOCKETS_INTERFACE void SteamNetworkingSockets_RunConnectionStatus
 	pInterface->RunCallbacks( &adapter );
 }
 
+static SandboxCallbacks g_Callbacks = SandboxCallbacks();
+
+STEAMNETWORKINGSOCKETS_INTERFACE void TickCallBacks( ISteamNetworkingSockets *pInterface ) {
+    pInterface->RunCallbacks( &g_Callbacks );
+}
+
+STEAMNETWORKINGSOCKETS_INTERFACE void ClearEventsQuene() {
+    g_Callbacks.ClearEventsQuene();
+}
+
+STEAMNETWORKINGSOCKETS_INTERFACE HSteamNetConnection HandleConnectionAccept() {
+	if( g_Callbacks._accept.size() == 0 ){
+		return k_HSteamNetConnection_Invalid;
+	};
+	HSteamNetConnection r = g_Callbacks._accept.front();
+	g_Callbacks._accept.pop_front();
+	return r;
+}
+
+STEAMNETWORKINGSOCKETS_INTERFACE HSteamNetConnection HandleConnectionClose() {
+	if( g_Callbacks._close.size() == 0 ){
+		return k_HSteamNetConnection_Invalid;
+	};
+	HSteamNetConnection r = g_Callbacks._close.front();
+	g_Callbacks._close.pop_front();
+	return r;
+}
+
+STEAMNETWORKINGSOCKETS_INTERFACE HSteamNetConnection HandleConnectionConnected() {
+	if( g_Callbacks._connected.size() == 0 ){
+		return k_HSteamNetConnection_Invalid;
+	};
+	HSteamNetConnection r = g_Callbacks._connected.front();
+	g_Callbacks._connected.pop_front();
+	return r;
+}
+
 }

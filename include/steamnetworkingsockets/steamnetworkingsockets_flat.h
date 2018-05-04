@@ -9,6 +9,10 @@
 #pragma once
 
 #include <stdint.h>
+#include <deque>
+#include <string>
+#include <iostream>
+#include "steamnetworkingtypes.h"
 #include "isteamnetworkingsockets.h"
 
 extern "C" {
@@ -65,3 +69,64 @@ STEAMNETWORKINGSOCKETS_INTERFACE void SteamNetworkingSockets_RunConnectionStatus
 }
 
 #endif // ISTEAMNETWORKINGSOCKETS
+
+extern "C" {
+    STEAMNETWORKINGSOCKETS_INTERFACE void TickCallBacks(ISteamNetworkingSockets *pInterface);
+    STEAMNETWORKINGSOCKETS_INTERFACE void ClearEventsQuene();
+    STEAMNETWORKINGSOCKETS_INTERFACE int HandleEvents(HSteamNetConnection *accept, HSteamNetConnection *close, HSteamNetConnection *connected);
+    STEAMNETWORKINGSOCKETS_INTERFACE HSteamNetConnection HandleConnectionAccept();
+    STEAMNETWORKINGSOCKETS_INTERFACE HSteamNetConnection HandleConnectionClose();
+    STEAMNETWORKINGSOCKETS_INTERFACE HSteamNetConnection HandleConnectionConnected();
+}
+
+extern "C" {
+    struct SandboxCallbacks : public ISteamNetworkingSocketsCallbacks {
+        std::deque<HSteamNetConnection> _close;
+        std::deque<HSteamNetConnection> _accept;
+        std::deque<HSteamNetConnection> _connected;
+
+        SandboxCallbacks() {
+            _close = std::deque<HSteamNetConnection>();
+            _accept = std::deque<HSteamNetConnection>();
+            _connected = std::deque<HSteamNetConnection>();
+        };
+        virtual ~SandboxCallbacks() {}
+        virtual void OnSteamNetConnectionStatusChanged( SteamNetConnectionStatusChangedCallback_t *pInfo ) override {
+            switch ( pInfo->m_info.m_eState ) {
+                case k_ESteamNetworkingConnectionState_ClosedByPeer:
+                case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
+                    printf( "Steam Net connection %x %s, reason %d: %s\n",
+                            pInfo->m_hConn,
+                            ( pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_ClosedByPeer ? "closed by peer" : "problem detected locally" ),
+                            pInfo->m_info.m_eEndReason,
+                            pInfo->m_info.m_szEndDebug
+                    );
+
+                    // Close our end
+                    SteamNetworkingSockets()->CloseConnection( pInfo->m_hConn, 0, nullptr, false );
+                    _close.push_back(pInfo->m_hConn);
+
+                    break;
+
+                case k_ESteamNetworkingConnectionState_Connecting:
+                    printf( "Accepting Steam Net connection %x\n", pInfo->m_hConn );
+                    _accept.push_back(pInfo->m_hConn);
+
+                    break;
+
+                case k_ESteamNetworkingConnectionState_Connected:
+                    _connected.push_back(pInfo->m_hConn);
+                    printf( "Connected Steam Net connection %x\n", pInfo->m_hConn );
+
+                    break;
+            }
+        }
+
+        void ClearEventsQuene() {
+            _close.clear();
+            _accept.clear();
+            _connected.clear();
+        }
+    };
+}
+
