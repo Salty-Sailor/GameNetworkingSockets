@@ -77,6 +77,10 @@ extern "C" {
     STEAMNETWORKINGSOCKETS_INTERFACE HSteamNetConnection HandleConnectionAccept();
     STEAMNETWORKINGSOCKETS_INTERFACE HSteamNetConnection HandleConnectionClose();
     STEAMNETWORKINGSOCKETS_INTERFACE HSteamNetConnection HandleConnectionConnected();
+
+    STEAMNETWORKINGSOCKETS_INTERFACE uint32 GetMessageSize(ISteamNetworkingMessage **message);
+    STEAMNETWORKINGSOCKETS_INTERFACE const void *GetMessagePayLoad(ISteamNetworkingMessage **message);
+    STEAMNETWORKINGSOCKETS_INTERFACE void ReleaseMessage(ISteamNetworkingMessage **message);
 }
 
 extern "C" {

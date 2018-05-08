@@ -68,12 +68,12 @@ STEAMNETWORKINGSOCKETS_INTERFACE EResult SteamNetworkingSockets_FlushMessagesOnC
 
 STEAMNETWORKINGSOCKETS_INTERFACE int SteamNetworkingSockets_ReceiveMessagesOnConnection( HSteamNetConnection hConn, ISteamNetworkingMessage **ppOutMessages, int nMaxMessages )
 {
-	return SteamNetworkingSockets()->ReceiveMessagesOnConnection( hConn, ppOutMessages, nMaxMessages );
+    return SteamNetworkingSockets()->ReceiveMessagesOnConnection( hConn, ppOutMessages, nMaxMessages );
 }
 
 STEAMNETWORKINGSOCKETS_INTERFACE int SteamNetworkingSockets_ReceiveMessagesOnListenSocket( HSteamListenSocket hSocket, ISteamNetworkingMessage **ppOutMessages, int nMaxMessages )
 {
-	return SteamNetworkingSockets()->ReceiveMessagesOnListenSocket( hSocket, ppOutMessages, nMaxMessages );
+    return SteamNetworkingSockets()->ReceiveMessagesOnListenSocket( hSocket, ppOutMessages, nMaxMessages );
 }
 
 STEAMNETWORKINGSOCKETS_INTERFACE bool SteamNetworkingSockets_GetConnectionInfo( HSteamNetConnection hConn, SteamNetConnectionInfo_t *pInfo )
@@ -230,6 +230,18 @@ STEAMNETWORKINGSOCKETS_INTERFACE HSteamNetConnection HandleConnectionConnected()
 	HSteamNetConnection r = g_Callbacks._connected.front();
 	g_Callbacks._connected.pop_front();
 	return r;
+}
+
+STEAMNETWORKINGSOCKETS_INTERFACE uint32 GetMessageSize(ISteamNetworkingMessage **message) {
+	return (*message)->GetSize();
+}
+
+STEAMNETWORKINGSOCKETS_INTERFACE const void *GetMessagePayLoad(ISteamNetworkingMessage **message) {
+	return (*message)->GetData();
+}
+
+STEAMNETWORKINGSOCKETS_INTERFACE void ReleaseMessage(ISteamNetworkingMessage **message) {
+	(*message)->Release();
 }
 
 }
