@@ -19,7 +19,6 @@
 #include <tier0/memdbgon.h>
 
 #include "steamnetworkingsockets_snp.h"
-#include "steamnetworkingsockets_snp_debug.h"
 
 struct SteamNetConnectionStatusChangedCallback_t;
 class ISteamNetworkingSocketsSerialized;
@@ -40,6 +39,7 @@ class CSteamNetworkConnectionBase;
 class CSteamNetworkListenSocketStandard;
 class CSharedSocket;
 struct SteamNetworkingMessageQueue;
+struct SNPAckSerializerHelper;
 
 // Fixed size byte array that automatically wipes itself upon destruction.
 // Used for storage of secret keys, etc.
@@ -63,13 +63,11 @@ public:
 //
 /////////////////////////////////////////////////////////////////////////////
 
-class CSteamNetworkingMessage : public ISteamNetworkingMessage
+class CSteamNetworkingMessage : public SteamNetworkingMessage_t
 {
 public:
-	CSteamNetworkingMessage( CSteamNetworkConnectionBase *pParent, uint32 cbSize, SteamNetworkingMicroseconds usecNow );
-
-	/// Implements ISteamNetworkingMessage
-	virtual void Release();
+	static CSteamNetworkingMessage *New( CSteamNetworkConnectionBase *pParent, uint32 cbSize, int64 nMsgNum, SteamNetworkingMicroseconds usecNow );
+	static void Delete( SteamNetworkingMessage_t *piMsg );
 
 	/// Remove it from queues
 	void Unlink();
@@ -104,9 +102,6 @@ public:
 
 	void LinkToQueueTail( Links CSteamNetworkingMessage::*pMbrLinks, SteamNetworkingMessageQueue *pQueue );
 	void UnlinkFromQueue( Links CSteamNetworkingMessage::*pMbrLinks );
-
-private:
-	virtual ~CSteamNetworkingMessage();
 };
 
 struct SteamNetworkingMessageQueue
@@ -126,7 +121,7 @@ struct SteamNetworkingMessageQueue
 	}
 
 	/// Remove the first messages out of the queue (up to nMaxMessages).  Returns the number returned
-	int RemoveMessages( ISteamNetworkingMessage **ppOutMessages, int nMaxMessages );
+	int RemoveMessages( SteamNetworkingMessage_t **ppOutMessages, int nMaxMessages );
 
 	/// Delete all queued messages
 	void PurgeMessages();
@@ -152,7 +147,7 @@ public:
 	/// This gets called on an accepted connection before it gets destroyed
 	virtual void AboutToDestroyChildConnection( CSteamNetworkConnectionBase *pConn );
 
-	int APIReceiveMessages( ISteamNetworkingMessage **ppOutMessages, int nMaxMessages );
+	int APIReceiveMessages( SteamNetworkingMessage_t **ppOutMessages, int nMaxMessages );
 
 	struct ChildConnectionKey_t
 	{
@@ -216,7 +211,7 @@ public:
 	EResult APIFlushMessageOnConnection();
 
 	/// Receive the next message(s)
-	int APIReceiveMessages( ISteamNetworkingMessage **ppOutMessages, int nMaxMessages );
+	int APIReceiveMessages( SteamNetworkingMessage_t **ppOutMessages, int nMaxMessages );
 
 	/// Accept a connection.  This will involve sending a message
 	/// to the client, and calling ConnectionState_Connected on the connection
@@ -324,10 +319,10 @@ public:
 
 	/// Derived classes will call this when they receive a packet, after removing
 	/// the appropriate transport level framing.
-	bool RecvDataChunk( uint16 unSeqNum, const void *pChunk, int cbChunk, int cbPacketSize, SteamNetworkingMicroseconds usecNow );
+	bool RecvDataChunk( uint16 nWireSeqNum, const void *pChunk, int cbChunk, int cbPacketSize, int usecTimeSinceLast, SteamNetworkingMicroseconds usecNow );
 
 	/// Called when we receive an (end-to-end) packet with a sequence number
-	void RecvNonDataSequencedPacket( uint16 nWireSeqNum, SteamNetworkingMicroseconds usecNow );
+	bool RecvNonDataSequencedPacket( uint16 nWireSeqNum, SteamNetworkingMicroseconds usecNow );
 
 	void GetDebugText( char *pszOut, int nOutCCH );
 
@@ -351,12 +346,22 @@ public:
 	void SNP_PopulateP2PSessionStateStats( P2PSessionState_t &info ) const;
 	bool SNP_BHasAnyBufferedRecvData() const
 	{
-		return m_receiverState.m_recvBuf.TellPut() > 0 || m_receiverState.m_recvBufReliable.TellPut() > 0;
+		return !m_receiverState.m_bufReliableStream.empty();
 	}
 	bool SNP_BHasAnyUnackedSentReliableData() const
 	{
 		return m_senderState.m_cbPendingReliable > 0 || m_senderState.m_cbSentUnackedReliable > 0;
 	}
+
+	/// Return true if we have any reason to send a packet.  This doesn't mean we have the bandwidth
+	/// to send it now, it just means we would like to send something ASAP
+	inline bool SNP_WantsToSendPacket() const
+	{
+		return m_receiverState.m_usecWhenFlushAck < INT64_MAX || m_senderState.TimeWhenWantToSendNextPacket() < INT64_MAX;
+	}
+
+	/// Send a data packet now, even if we don't have the bandwidth available
+	int SNP_SendPacket( SteamNetworkingMicroseconds usecNow, int cbMaxEncryptedPayload, void *pConnectionData );
 
 protected:
 	CSteamNetworkConnectionBase( CSteamNetworkingSockets *pSteamNetworkingSocketsInterface );
@@ -404,9 +409,6 @@ protected:
 	/// to provide a more specific explanation.  Base class just uses the generic reason codes.
 	virtual void GuessTimeoutReason( ESteamNetConnectionEnd &nReasonCode, ConnectionEndDebugMsg &msg, SteamNetworkingMicroseconds usecNow );
 
-	// Encrypted wrapper around SendDataChunk
-	int EncryptAndSendDataChunk( const void *pChunk, int cbChunk, SteamNetworkingMicroseconds usecNow, uint16 *pOutSeqNum );
-
 	/// Hook to allow connections to customize message sending.
 	/// (E.g. loopback.)
 	virtual EResult _APISendMessageToConnection( const void *pData, uint32 cbData, ESteamNetworkingSendType eSendType );
@@ -415,14 +417,17 @@ protected:
 	/// "chunk" with the appropriate framing, and route it to the 
 	/// appropriate host.  A "chunk" might contain a mix of reliable 
 	/// and unreliable data.  We use the same framing for data 
-	/// payloads for all connection types. pOutSeqNum will be filled 
-	/// with the sequence number of the packet sent. Return value is 
+	/// payloads for all connection types.  Return value is 
 	/// the number of bytes written to the network layer, UDP/IP 
 	/// header is not included.
-	virtual int SendDataChunk( const void *pChunk, int cbChunk, SteamNetworkingMicroseconds usecNow, uint16 *pOutSeqNum ) = 0;
+	///
+	/// pConnectionContext is whatever the connection later passed
+	/// to SNP_SendPacket, if the connection initiated the sending
+	/// of the packet
+	virtual int SendEncryptedDataChunk( const void *pChunk, int cbChunk, SteamNetworkingMicroseconds usecNow, void *pConnectionContext ) = 0;
 
 	/// Called when we receive a complete message.  Should allocate a message object and put it into the proper queues
-	virtual void ReceivedMessage( const void *pData, int cbData, SteamNetworkingMicroseconds usecNow );
+	virtual void ReceivedMessage( const void *pData, int cbData, int64 nMsgNum, SteamNetworkingMicroseconds usecNow );
 
 	/// Called when the state changes
 	virtual void ConnectionStateChanged( ESteamNetworkingConnectionState eOldState );
@@ -492,30 +497,45 @@ protected:
 	//
 
 	void SNP_InitializeConnection( SteamNetworkingMicroseconds usecNow );
-	EResult SNP_SendMessage( SteamNetworkingMicroseconds usecNow, const void *pData, uint32 cbData, ESteamNetworkingSendType eSendType );
-	void SNP_ThinkSendState( SteamNetworkingMicroseconds usecNow );
-	SteamNetworkingMicroseconds SNP_GetNextThinkTime( SteamNetworkingMicroseconds usecNow ) const;
-	void SNP_ScheduleNextThink( SteamNetworkingMicroseconds usecNow ) const;
+	EResult SNP_SendMessage( SteamNetworkingMicroseconds usecNow, const void *pData, int cbData, ESteamNetworkingSendType eSendType );
+	SteamNetworkingMicroseconds SNP_ThinkSendState( SteamNetworkingMicroseconds usecNow );
+	SteamNetworkingMicroseconds SNP_GetNextThinkTime( SteamNetworkingMicroseconds usecNow );
 	void SNP_PrepareFeedback( SteamNetworkingMicroseconds usecNow );
-	bool SNP_RecvDataChunk( uint16 unSeqNum, const void *pChunk, int cbChunk, int cbPacketSize, SteamNetworkingMicroseconds usecNow );
-	void SNP_RecvNonDataPacket( uint16 unSeqNum, SteamNetworkingMicroseconds usecNow );
-	void SNP_MoveSentToSend( SteamNetworkingMicroseconds usecNow );
-	void SNP_CheckForReliable( SteamNetworkingMicroseconds usecNow );
+	bool SNP_RecvDataChunk( int64 nPktNum, const void *pChunk, int cbChunk, int cbPacketSize, SteamNetworkingMicroseconds usecNow );
+	void SNP_ReceiveUnreliableSegment( int64 nMsgNum, int nOffset, const void *pSegmentData, int cbSegmentSize, bool bLastSegmentInMessage, SteamNetworkingMicroseconds usecNow );
+	bool SNP_ReceiveReliableSegment( int64 nPktNum, int64 nSegBegin, const uint8 *pSegmentData, int cbSegmentSize, SteamNetworkingMicroseconds usecNow );
+	//void SNP_MoveSentToSend( SteamNetworkingMicroseconds usecNow );
+	//void SNP_CheckForReliable( SteamNetworkingMicroseconds usecNow );
 	void SNP_UpdateX( SteamNetworkingMicroseconds usecNow );
-	bool SNP_InsertSegment( SSNPBuffer *p_buf, uint8 flags, int nSize );
 	std::string SNP_GetDebugText();
 	void SNP_PopulateDetailedStats( SteamDatagramLinkStats &info ) const;
 	void SNP_PopulateQuickStats( SteamNetworkingQuickConnectionStatus &info, SteamNetworkingMicroseconds usecNow );
-	bool SNP_UpdateIMean( uint16 unSeqNum, SteamNetworkingMicroseconds usecNow );
-	bool SNP_AddLossEvent( uint16 unSeqNum, SteamNetworkingMicroseconds usecNow );
+	//bool SNP_UpdateIMean( uint16 unSeqNum, SteamNetworkingMicroseconds usecNow );
+	//bool SNP_AddLossEvent( uint16 unSeqNum, SteamNetworkingMicroseconds usecNow );
 	bool SNP_CalcIMean( SteamNetworkingMicroseconds usecNow );
 	void SNP_NoFeedbackTimer( SteamNetworkingMicroseconds usecNow );
-	int SNP_SendPacket( SteamNetworkingMicroseconds usecNow );
-	int SNP_CheckForLoss( uint16 unSeqNum, SteamNetworkingMicroseconds usecNow );
-	void SNP_RecordPacket( uint16 unSeqNum, SteamNetworkingMicroseconds unRtt, SteamNetworkingMicroseconds usecNow );
+	//int SNP_CheckForLoss( uint16 unSeqNum, SteamNetworkingMicroseconds usecNow );
+	bool SNP_RecordReceivedPktNum( int64 nPktNum, SteamNetworkingMicroseconds usecNow );
 	EResult SNP_FlushMessage( SteamNetworkingMicroseconds usecNow );
 
+	/// Mark a packet as dropped
+	void SNP_SenderProcessPacketNack( int64 nPktNum, SNPInFlightPacket_t &pkt, const char *pszDebug );
+
+	/// Check in flight packets.  Expire any that need to be, and return the time when the
+	/// next one that is not yet expired will be expired.
+	SteamNetworkingMicroseconds SNP_SenderCheckInFlightPackets( SteamNetworkingMicroseconds usecNow );
+
+	int GetEffectiveMinRate() const;
+	int GetEffectiveMaxRate() const;
+
+	SSNPSenderState m_senderState;
+	SSNPReceiverState m_receiverState;
+
 private:
+
+	void SNP_GatherAckBlocks( SNPAckSerializerHelper &helper, SteamNetworkingMicroseconds usecNow );
+	uint8 *SNP_SerializeAckBlocks( const SNPAckSerializerHelper &helper, uint8 *pOut, const uint8 *pOutEnd, SteamNetworkingMicroseconds usecNow );
+	uint8 *SNP_SerializeStopWaitingFrame( uint8 *pOut, const uint8 *pOutEnd, SteamNetworkingMicroseconds usecNow );
 
 	void SetState( ESteamNetworkingConnectionState eNewState, SteamNetworkingMicroseconds usecNow );
 	ESteamNetworkingConnectionState m_eConnectionState;
@@ -523,9 +543,6 @@ private:
 	/// Timestamp when we entered the current state.  Used for various
 	/// timeouts.
 	SteamNetworkingMicroseconds m_usecWhenEnteredConnectionState;
-
-	SSNPSenderState m_senderState;
-	SSNPReceiverState m_receiverState;
 };
 
 /////////////////////////////////////////////////////////////////////////////
@@ -571,7 +588,6 @@ private:
 	void ReceivedIPv4_ChallengeRequest( const CMsgSteamSockets_UDP_ChallengeRequest &msg, const netadr_t &adrFrom, SteamNetworkingMicroseconds usecNow );
 	void ReceivedIPv4_ConnectRequest( const CMsgSteamSockets_UDP_ConnectRequest &msg, const netadr_t &adrFrom, int cbPkt, SteamNetworkingMicroseconds usecNow );
 	void ReceivedIPv4_ConnectionClosed( const CMsgSteamSockets_UDP_ConnectionClosed &msg, const netadr_t &adrFrom, SteamNetworkingMicroseconds usecNow );
-	void ReceivedIPv4_Stats( const CMsgSteamSockets_UDP_Stats &msg, const netadr_t &adrFrom, int cbPkt, SteamNetworkingMicroseconds usecNow );
 	void SendMsgIPv4( uint8 nMsgID, const google::protobuf::MessageLite &msg, const netadr_t &adrTo );
 	void SendPaddedMsgIPv4( uint8 nMsgID, const google::protobuf::MessageLite &msg, const netadr_t adrTo );
 };
@@ -592,7 +608,7 @@ public:
 	virtual void SendEndToEndConnectRequest( SteamNetworkingMicroseconds usecNow ) OVERRIDE;
 	virtual void SendEndToEndPing( bool bUrgent, SteamNetworkingMicroseconds usecNow ) OVERRIDE;
 	virtual EResult APIAcceptConnection() OVERRIDE;
-	virtual int SendDataChunk( const void *pChunk, int cbChunk, SteamNetworkingMicroseconds usecNow, uint16 *pOutSeqNum ) OVERRIDE;
+	virtual int SendEncryptedDataChunk( const void *pChunk, int cbChunk, SteamNetworkingMicroseconds usecNow, void *pConnectionContext ) OVERRIDE;
 	virtual EResult _APISendMessageToConnection( const void *pData, uint32 cbData, ESteamNetworkingSendType eSendType ) OVERRIDE;
 	virtual void ConnectionStateChanged( ESteamNetworkingConnectionState eOldState ) OVERRIDE;
 	virtual void PostConnectionStateChangedCallback( ESteamNetworkingConnectionState eOldAPIState, ESteamNetworkingConnectionState eNewAPIState ) OVERRIDE;
@@ -624,7 +640,6 @@ extern CUtlLinkedList<SteamNetConnectionStatusChangedCallback_t> g_listPendingCo
 extern int g_iPartnerMask;
 
 extern bool BCheckGlobalSpamReplyRateLimit( SteamNetworkingMicroseconds usecNow );
-extern void UpdateSNPDebugWindow();
 extern CSteamNetworkConnectionBase *FindConnectionByLocalID( uint32 nLocalConnectionID );
 
 } // namespace SteamNetworkingSocketsLib

@@ -11,6 +11,13 @@
 #endif
 #include "crypto.h"
 
+#ifdef LINUX
+	#include <sys/types.h>
+	#include <ifaddrs.h>
+	#include <sys/ioctl.h>
+	#include <net/if.h>
+#endif
+
 #define DEFINE_CONFIG // instance the variables here
 
 #include "steamnetworkingconfig.h"
@@ -48,20 +55,16 @@ static SConfigurationValueEntry sConfigurationValueEntryList[] =
 	{ k_ESteamNetworkingConfigurationValue_FakePacketReorder_Recv,                     "FakePacketReorder_Recv",                     &steamdatagram_fakepacketreorder_recv },
 	{ k_ESteamNetworkingConfigurationValue_FakePacketReorder_Time,                     "FakePacketReorder_Time",                     &steamdatagram_fakepacketreorder_time },
 
-	{ k_ESteamNetworkingConfigurationValue_SNP_DebugWindow,                            "SNP_DebugWindow",                            &steamdatagram_snp_debug_window },
-	{ k_ESteamNetworkingConfigurationValue_SNP_SendBufferSize,                         "SNP_SendBufferSize",                         &steamdatagram_snp_send_buffer_size },
-	{ k_ESteamNetworkingConfigurationValue_SNP_MaxRate,                                "SNP_MaxRate",                                &steamdatagram_snp_max_rate },
-	{ k_ESteamNetworkingConfigurationValue_SNP_MinRate,                                "SNP_MinRate",                                &steamdatagram_snp_min_rate },
-	{ k_ESteamNetworkingConfigurationValue_SNP_Nagle_Time,                             "SNP_Nagle_Time",                             &steamdatagram_snp_nagle_time },
-	{ k_ESteamNetworkingConfigurationValue_SNP_Log_RTT,                                "SNP_Log_RTT",                                &steamdatagram_snp_log_rtt },
-	{ k_ESteamNetworkingConfigurationValue_SNP_Log_Packet,                             "SNP_Log_Packet",                             &steamdatagram_snp_log_packet },
-	{ k_ESteamNetworkingConfigurationValue_SNP_Log_Segments,                           "SNP_Log_Segments",                           &steamdatagram_snp_log_segments },
-	{ k_ESteamNetworkingConfigurationValue_SNP_Log_Feedback,                           "SNP_Log_Feedback",                           &steamdatagram_snp_log_feedback },
-	{ k_ESteamNetworkingConfigurationValue_SNP_Log_Reliable,                           "SNP_Log_Reliable",                           &steamdatagram_snp_log_reliable },
-	{ k_ESteamNetworkingConfigurationValue_SNP_Log_Message,                            "SNP_Log_Message",                            &steamdatagram_snp_log_message },
-	{ k_ESteamNetworkingConfigurationValue_SNP_Log_Loss,                               "SNP_Log_Loss",                               &steamdatagram_snp_log_loss },
-	{ k_ESteamNetworkingConfigurationValue_SNP_Log_X,                                  "SNP_Log_X",                                  &steamdatagram_snp_log_x },
-	{ k_ESteamNetworkingConfigurationValue_SNP_Log_Nagle,                              "SNP_Log_Nagle",                              &steamdatagram_snp_log_nagle },
+	{ k_ESteamNetworkingConfigurationValue_SendBufferSize,                             "SendBufferSize",                             &steamdatagram_snp_send_buffer_size },
+	{ k_ESteamNetworkingConfigurationValue_MaxRate,                                    "MaxRate",                                    &steamdatagram_snp_max_rate },
+	{ k_ESteamNetworkingConfigurationValue_MinRate,                                    "MinRate",                                    &steamdatagram_snp_min_rate },
+	{ k_ESteamNetworkingConfigurationValue_Nagle_Time,                                 "Nagle_Time",                                 &steamdatagram_snp_nagle_time },
+	{ k_ESteamNetworkingConfigurationValue_LogLevel_AckRTT,                            "Log_AckRTT",                                 &steamdatagram_snp_log_ackrtt },
+	{ k_ESteamNetworkingConfigurationValue_LogLevel_Packet,                            "Log_Packet",                                 &steamdatagram_snp_log_packet },
+	{ k_ESteamNetworkingConfigurationValue_LogLevel_Message,                           "Log_Message",                                &steamdatagram_snp_log_message },
+	{ k_ESteamNetworkingConfigurationValue_LogLevel_PacketGaps,                        "Log_PacketGaps",                             &steamdatagram_snp_log_packetgaps },
+	{ k_ESteamNetworkingConfigurationValue_LogLevel_P2PRendezvous,                     "Log_p2prendezvous",                          &steamdatagram_snp_log_p2prendezvous },
+	{ k_ESteamNetworkingConfigurationValue_LogLevel_RelayPings,                        "Log_RelayPings",                             &steamdatagram_snp_log_relaypings },
 	{ k_ESteamNetworkingConfigurationValue_ClientConsecutitivePingTimeoutsFailInitial, "ClientConsecutitivePingTimeoutsFailInitial", &steamdatagram_client_consecutitive_ping_timeouts_fail_initial },
 	{ k_ESteamNetworkingConfigurationValue_ClientConsecutitivePingTimeoutsFail,        "ClientConsecutitivePingTimeoutsFail",        &steamdatagram_client_consecutitive_ping_timeouts_fail },
 	{ k_ESteamNetworkingConfigurationValue_ClientMinPingsBeforePingAccurate,           "ClientMinPingsBeforePingAccurate",           &steamdatagram_client_min_pings_before_ping_accurate },
@@ -70,8 +73,7 @@ static SConfigurationValueEntry sConfigurationValueEntryList[] =
 	{ k_ESteamNetworkingConfigurationValue_Timeout_Seconds_Initial,                    "TimeoutSecondsInitial",                      &steamdatagram_timeout_seconds_initial },
 	{ k_ESteamNetworkingConfigurationValue_Timeout_Seconds_Connected,                  "TimeoutSecondsConnected",                    &steamdatagram_timeout_seconds_connected },
 };
-const int k_nDeprecated = 1;
-COMPILE_TIME_ASSERT( sizeof( sConfigurationValueEntryList ) / sizeof( SConfigurationValueEntry ) == k_ESteamNetworkingConfigurationValue_Count - k_nDeprecated );
+COMPILE_TIME_ASSERT( sizeof( sConfigurationValueEntryList ) / sizeof( SConfigurationValueEntry ) == k_ESteamNetworkingConfigurationValue_Count );
 
 struct SConfigurationStringEntry
 {
@@ -680,7 +682,7 @@ EResult CSteamNetworkingSockets::FlushMessagesOnConnection( HSteamNetConnection 
 	return pConn->APIFlushMessageOnConnection();
 }
 	
-int CSteamNetworkingSockets::ReceiveMessagesOnConnection( HSteamNetConnection hConn, ISteamNetworkingMessage **ppOutMessages, int nMaxMessages )
+int CSteamNetworkingSockets::ReceiveMessagesOnConnection( HSteamNetConnection hConn, SteamNetworkingMessage_t **ppOutMessages, int nMaxMessages )
 {
 	SteamDatagramTransportLock scopeLock;
 	CSteamNetworkConnectionBase *pConn = GetConnectionByHandle( hConn );
@@ -689,7 +691,7 @@ int CSteamNetworkingSockets::ReceiveMessagesOnConnection( HSteamNetConnection hC
 	return pConn->APIReceiveMessages( ppOutMessages, nMaxMessages );
 }
 
-int CSteamNetworkingSockets::ReceiveMessagesOnListenSocket( HSteamListenSocket hSocket, ISteamNetworkingMessage **ppOutMessages, int nMaxMessages )
+int CSteamNetworkingSockets::ReceiveMessagesOnListenSocket( HSteamListenSocket hSocket, SteamNetworkingMessage_t **ppOutMessages, int nMaxMessages )
 {
 	SteamDatagramTransportLock scopeLock;
 	CSteamNetworkListenSocketBase *pSock = GetListenSockedByHandle( hSocket );
@@ -1061,15 +1063,152 @@ bool CSteamNetworkingSockets::SetCertificate( const void *pCert, int cbCert, voi
 	return true;
 }
 
-uint16 CSteamNetworkingSockets::GetHostedDedicatedServerListenPort()
+inline bool IsPrivateIP( uint32 unIP )
 {
-	static int nPort = -1;
-	if ( nPort == -1 )
+	// RFC 1918
+	if ( ( unIP & 0xff000000 ) == netadr_t("10.0.0.0").GetIP() )
+		return true;
+	if ( ( unIP & 0xfff00000 ) == netadr_t("172.16.0.0").GetIP() )
+		return true;
+	if ( ( unIP & 0xffff0000 ) == netadr_t("192.168.0.0").GetIP() )
+		return true;
+	return false;
+}
+
+static uint16 s_nHostedDedicatedServerPort;
+static SteamNetworkingPOPID s_nHostedDedicatedServerPOPID;
+static uint32 s_nHostedDedicatedServerIP;
+
+bool CSteamNetworkingSockets::GetHostedDedicatedServerInfo( SteamDatagramServiceNetID *pRouting, SteamNetworkingPOPID *pPopID )
+{
+	if ( !m_bGameServer )
 	{
-		const char *SDR_LISTEN_PORT = getenv( "SDR_LISTEN_PORT" );
-		nPort = SDR_LISTEN_PORT ? atoi( SDR_LISTEN_PORT ) : 0;
+		AssertMsg( false, "GetHostedDedicatedServerInfo should be called thorugh a gameserver's ISteamSocketNetworking" );
+		return false;
 	}
-	return nPort;
+
+	static bool bOnce = false;
+	if ( !bOnce  )
+	{
+		bOnce = true;
+
+		// Check if we are a hosted dedicated server
+		const char *SDR_LISTEN_PORT = getenv( "SDR_LISTEN_PORT" );
+		if ( SDR_LISTEN_PORT )
+		{
+			SpewMsg( "SDR_LISTEN_PORT = %s\n", SDR_LISTEN_PORT );
+			s_nHostedDedicatedServerPort = atoi( SDR_LISTEN_PORT );
+			Assert( s_nHostedDedicatedServerPort );
+		}
+
+		const char *SDR_POPID = getenv( "SDR_POPID" );
+		if ( SDR_POPID )
+		{
+			SpewMsg( "SDR_POPID = '%s'\n", SDR_POPID );
+			s_nHostedDedicatedServerPOPID = CalculateSteamNetworkingPOPIDFromString( SDR_POPID );
+		}
+
+		//
+		// Deduce public IP
+		//
+		if ( s_nHostedDedicatedServerPort )
+		{
+
+			// Try to deduce our IP
+			// Set via environment variable?
+			const char *SDR_IP = getenv( "SDR_IP" );
+			if ( SDR_IP )
+			{
+				SpewMsg( "SDR_IP = '%s'\n", SDR_IP );
+				netadr_t adr;
+				if ( !adr.SetFromString( SDR_IP ) )
+					Plat_FatalError( "SDR_IP='%s', which isn't a valid IP address", SDR_IP );
+				s_nHostedDedicatedServerIP = adr.GetIP();
+			}
+			else
+			{
+
+				// Get list of IP addresses
+				CUtlVector<netadr_t> vecIPs;
+
+				// On linux, use getifaddr, so it doesn't matter how they have DNS resolved.  Basically
+				// we want to make sure we don't end up resolving our own hostname back to the loopback.
+				#ifdef LINUX
+					ifaddrs *pMyAddrInfo = NULL;
+					int r = getifaddrs( &pMyAddrInfo );
+					if ( r != 0 )
+						Plat_FatalError( "getifaddrs() failed, returned %d",  r );
+					for ( ifaddrs *pAddr = pMyAddrInfo ; pAddr ; pAddr = pAddr->ifa_next )
+					{
+						if ( ( pAddr->ifa_flags & IFF_LOOPBACK ) != 0 || !pAddr->ifa_addr )
+							continue;
+						netadr_t adr;
+						if ( !adr.SetFromSockadr( pAddr->ifa_addr ) )
+							continue;
+						vecIPs.AddToTail( adr );
+					}
+					freeifaddrs( pMyAddrInfo );
+				#elif defined(WIN32)
+
+					// On Windows resolve our hostname.
+					char szHostName[ 256 ];
+					if ( gethostname( szHostName, sizeof(szHostName) ) != 0 )
+						Plat_FatalError( "gethostname failed, error code 0x%x",  GetLastSocketError() );
+					addrinfo *pMyAddrInfo = NULL;
+					int r = getaddrinfo( szHostName, NULL, NULL, &pMyAddrInfo );
+					if ( r != 0 )
+						Plat_FatalError( "getaddrinfo(%s) failed, returned %d",  szHostName, r );
+					for ( addrinfo *pAddr = pMyAddrInfo ; pAddr ; pAddr = pAddr->ai_next )
+					{
+						if ( pAddr->ai_family != AF_INET || !pAddr->ai_addr )
+							continue;
+						netadr_t adr;
+						if ( !adr.SetFromSockadr( pAddr->ai_addr ) )
+							continue;
+						vecIPs.AddToTail( adr );
+					}
+					freeaddrinfo( pMyAddrInfo );
+				#endif
+
+				// Scan list of IPs.  If we have a single public-IP, then we're probably good
+				for ( netadr_t adr: vecIPs )
+				{
+					uint32 nCheckIP = adr.GetIP();
+					if ( !IsPrivateIP( nCheckIP ) || ( g_eUniverse == k_EUniverseBeta && ( nCheckIP >> 24U ) == 172 ) ) // Allow 172.x.x.x.x address to count as "public" on beta universe
+					{
+						if ( s_nHostedDedicatedServerIP )
+							SpewWarning( "Host is configured with multiple public IPs.  Using %s; ignoring %s\n", CUtlNetAdrRender( s_nHostedDedicatedServerIP ).String(), CUtlNetAdrRender( nCheckIP ).String() );
+						else
+							s_nHostedDedicatedServerIP = nCheckIP;
+					}
+				}
+				if ( s_nHostedDedicatedServerIP == 0 )
+				{
+					if ( SDR_POPID )
+						Plat_FatalError( "Cannot deduce public IP." );
+					SpewWarning( "Unable to deduce server's public IP.  If you are running the server behind a firewall, you'll need to supply the public IP:port that will be forwarded to this server in the SDR ticket.\n" );
+				}
+				else
+				{
+					SpewMsg( "%s appears to be SDR public address.\n", CUtlNetAdrRender( s_nHostedDedicatedServerIP, s_nHostedDedicatedServerPort ).String() );
+				}
+			}
+		}
+	}
+
+	if ( s_nHostedDedicatedServerPort == 0 )
+		return false;
+	if ( pRouting )
+	{
+		pRouting->Clear();
+		pRouting->m_unPort = s_nHostedDedicatedServerPort;
+		pRouting->m_unIP = s_nHostedDedicatedServerIP;
+	}
+
+	if ( pPopID )
+		*pPopID = s_nHostedDedicatedServerPOPID;
+
+	return true;
 }
 
 HSteamListenSocket CSteamNetworkingSockets::CreateHostedDedicatedServerListenSocket( int nVirtualPort )
@@ -1080,8 +1219,8 @@ HSteamListenSocket CSteamNetworkingSockets::CreateHostedDedicatedServerListenSoc
 		AssertMsg( false, "CreateHostedDedicatedServerListenSocket should be called thorugh a gameserver's ISteamSocketNetworking" );
 		return k_HSteamListenSocket_Invalid;
 	}
-	uint16 nPhysicalPort = GetHostedDedicatedServerListenPort();
-	if ( nPhysicalPort == 0 )
+	SteamDatagramServiceNetID routing;
+	if ( !GetHostedDedicatedServerInfo( &routing, nullptr ) )
 	{
 		AssertMsg( false, "SDR_LISTEN_PORT not set, should not call CreateHostedDedicatedServerListenSocket" );
 		return k_HSteamListenSocket_Invalid;
@@ -1090,13 +1229,14 @@ HSteamListenSocket CSteamNetworkingSockets::CreateHostedDedicatedServerListenSoc
 	if ( !pSock )
 		return k_HSteamListenSocket_Invalid;
 	SteamDatagramErrMsg errMsg;
-	if ( !pSock->BInit( nPhysicalPort, nVirtualPort, errMsg ) )
+	if ( !pSock->BInit( routing.m_unPort, nVirtualPort, errMsg ) )
 	{
 		SpewError( "Cannot create hosted dedicated server listen socket.  %s", errMsg );
 		delete pSock;
 		return k_HSteamListenSocket_Invalid;
 	}
 
+	SpewMsg( "Listening for SDR relayed traffic on UDP port %d (virtual port %d).", routing.m_unPort, nVirtualPort );
 	return AddListenSocket( pSock );
 }
 
@@ -1258,7 +1398,6 @@ void CSteamNetworkingSockets::RunCallbacks( ISteamNetworkingSocketsCallbacks *pC
 	CUtlLinkedList<QueuedCallback> listTemp;
 	{
 		SteamDatagramTransportLock scopeLock;
-		UpdateSNPDebugWindow();
 
 		// Swap list with the temp one
 		listTemp.Swap( m_listPendingCallbacks );
@@ -1372,7 +1511,7 @@ STEAMNETWORKINGSOCKETS_INTERFACE void SteamDatagramClient_Internal_SteamAPIKludg
 //#undef STEAMCLIENT_INTERFACE_VERSION
 //#define STEAMCLIENT_INTERFACE_VERSION		"SteamClient017"
 
-STEAMNETWORKINGSOCKETS_INTERFACE bool SteamDatagramClient_Init_InternalV4( int iPartnerMask, SteamDatagramErrMsg &errMsg, FSteamInternal_CreateInterface fnCreateInterface, HSteamUser hSteamUser, HSteamPipe hSteamPipe )
+STEAMNETWORKINGSOCKETS_INTERFACE bool SteamDatagramClient_Init_InternalV5( int iPartnerMask, SteamDatagramErrMsg &errMsg, FSteamInternal_CreateInterface fnCreateInterface, HSteamUser hSteamUser, HSteamPipe hSteamPipe )
 {
 	SteamDatagramTransportLock lock;
 	if ( g_pSteamUser )
@@ -1445,9 +1584,13 @@ STEAMNETWORKINGSOCKETS_INTERFACE bool SteamDatagramServer_Init_Internal( SteamDa
 	if ( !g_SteamNetworkingSocketsGameServer.BInit( pClient, hSteamUser, hSteamPipe, errMsg ) )
 		return false;
 
+	// Check environment variables
+	g_SteamNetworkingSocketsGameServer.GetHostedDedicatedServerInfo( nullptr, nullptr );
+
 	// Check environment variables, see if we are hosed in our data center
 	char *pszPrivateKey = getenv( "SDR_PRIVATE_KEY" );
 	char *pszCert = getenv( "SDR_CERT" );
+	const char *SDR_POPID = getenv( "SDR_POPID" );
 	if ( pszPrivateKey && *pszPrivateKey && pszCert && *pszCert )
 	{
 		SteamDatagramErrMsg certErrMsg;
@@ -1457,6 +1600,28 @@ STEAMNETWORKINGSOCKETS_INTERFACE bool SteamDatagramServer_Init_Internal( SteamDa
 			return false;
 		}
 		SpewMsg( "Using cert from SDR_PRIVATE_KEY and SDR_CERT environment vars\n" );
+
+		if ( !SDR_POPID || !s_nHostedDedicatedServerPOPID )
+		{
+			V_sprintf_safe( errMsg, "SDR_PRIVATE_KEY/SDR_CERT are set, but not SDR_POPID!  We don't know what data center we are in.\n" );
+			return false;
+		}
+
+		// Make sure we are using a cert that is legit for us!
+		bool bCertForThisPopID = false;
+		for ( uint32 nCertPopID: g_SteamNetworkingSocketsGameServer.m_msgCert.gameserver_datacenter_ids() )
+		{
+			if ( nCertPopID == s_nHostedDedicatedServerPOPID )
+			{
+				bCertForThisPopID  = true;
+				break;
+			}
+		}
+		if ( !bCertForThisPopID  )
+		{
+			V_sprintf_safe( errMsg, "SDR_POPID=%s, but our cert is not valid for that PoP ID!\n", SDR_POPID );
+			return false;
+		}
 	}
 	else
 	{
@@ -1464,9 +1629,17 @@ STEAMNETWORKINGSOCKETS_INTERFACE bool SteamDatagramServer_Init_Internal( SteamDa
 		AssertMsg( ( pszPrivateKey == nullptr || *pszPrivateKey == '\0' )
 			&& ( pszCert == nullptr || *pszCert == '\0' ), "Specified only one of SDR_PRIVATE_KEY and SDR_CERT" );
 
-		if ( g_SteamNetworkingSocketsGameServer.GetHostedDedicatedServerListenPort() )
+		// Make this fatal on production
+		if ( SDR_POPID )
 		{
-			SpewWarning( "SDR_LISTEN_PORT is set, but not SDR_CERT & SDR_PRIVATE_KEY!  Clients will not be able to trust this server.  This is OK for dev, but should not happen in production!\n" );
+			V_sprintf_safe( errMsg, "SDR_POPID is set, but not SDR_PRIVATE_KEY/SDR_CERT!  Certs are required in production data centers.\n" );
+			return false;
+		}
+
+		// Otherwise, spew a message just to be clear
+		if ( s_nHostedDedicatedServerPort )
+		{
+			SpewMsg( "SDR_POPID is set, but not SDR_CERT & SDR_PRIVATE_KEY!  Clients will not be able to trust this server.  This is OK for dev, but should not happen in production!\n" );
 		}
 	}
 

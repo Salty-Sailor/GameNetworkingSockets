@@ -20,6 +20,8 @@
 
 #include "steamnetworkingtypes.h"
 
+class ISteamNetworkingSocketsCallbacks;
+
 #ifdef STEAMNETWORKINGSOCKETS_OPENSOURCE
 enum { k_iSteamNetworkingCallbacks = 1200 };
 #else
@@ -27,12 +29,6 @@ enum { k_iSteamNetworkingCallbacks = 1200 };
 #include <steam/steam_api.h>
 #include <steam/steam_gameserver.h>
 #endif
-
-struct SteamDatagramRelayAuthTicket;
-class ISteamNetworkingSocketsCallbacks;
-struct SteamNetConnectionStatusChangedCallback_t;
-struct P2PSessionRequest_t;
-struct P2PSessionConnectFail_t;
 
 //-----------------------------------------------------------------------------
 /// Lower level networking interface that more closely mirrors the standard
@@ -221,17 +217,17 @@ public:
 	/// If any messages are returned, you MUST call Release() to each of them free up resources
 	/// after you are done.  It is safe to keep the object alive for a little while (put it
 	/// into some queue, etc), and you may call Release() from any thread.
-	virtual int ReceiveMessagesOnConnection( HSteamNetConnection hConn, ISteamNetworkingMessage **ppOutMessages, int nMaxMessages ) = 0; 
+	virtual int ReceiveMessagesOnConnection( HSteamNetConnection hConn, SteamNetworkingMessage_t **ppOutMessages, int nMaxMessages ) = 0; 
 
 	/// Same as ReceiveMessagesOnConnection, but will return the next message available
-	/// on any client socket that was accepted through the specified listen socket.  Use
-	/// ISteamNetworkingMessage::GetConnection to know which client connection.
+	/// on any client socket that was accepted through the specified listen socket.  Examine
+	/// SteamNetworkingMessage_t::m_conn to know which client connection.
 	///
 	/// Delivery order of messages among different clients is not defined.  They may
 	/// be returned in an order different from what they were actually received.  (Delivery
 	/// order of messages from the same client is well defined, and thus the order of the
 	/// messages is relevant!)
-	virtual int ReceiveMessagesOnListenSocket( HSteamListenSocket hSocket, ISteamNetworkingMessage **ppOutMessages, int nMaxMessages ) = 0; 
+	virtual int ReceiveMessagesOnListenSocket( HSteamListenSocket hSocket, SteamNetworkingMessage_t **ppOutMessages, int nMaxMessages ) = 0; 
 
 	/// Returns information about the specified connection.
 	virtual bool GetConnectionInfo( HSteamNetConnection hConn, SteamNetConnectionInfo_t *pInfo ) = 0;
@@ -285,7 +281,9 @@ public:
 	//
 
 	/// Called when we receive a ticket from our central matchmaking system.  Puts the
-	/// ticket into a persistent cache, and optionally returns the cracked ticket
+	/// ticket into a persistent cache, and optionally returns the parsed ticket.
+	///
+	/// See stamdatagram_ticketgen.h for more details.
 	virtual bool ReceivedRelayAuthTicket( const void *pvTicket, int cbTicket, SteamDatagramRelayAuthTicket *pOutParsedTicket ) = 0;
 
 	/// Search cache for a ticket to talk to the server on the specified virtual port.
@@ -301,25 +299,35 @@ public:
 	///
 	/// You may wonder why tickets are stored in a cache, instead of simply being passed as an argument
 	/// here.  The reason is to make reconnection to a gameserver robust, even if the client computer loses
-	/// connection to Steam or the central backend, or the app is restarted or creashes, etc.
+	/// connection to Steam or the central backend, or the app is restarted or crashes, etc.
 	virtual HSteamNetConnection ConnectToHostedDedicatedServer( CSteamID steamIDTarget, int nVirtualPort ) = 0;
 
 	//
 	// Servers hosted in Valve data centers
 	//
 
-	/// Return the port that we are configured to listen on, or 0 if we are not running in
-	/// a Valve data center with an SDR port assignment.
+	/// Return info about the hosted server.  You will need to send this information to your
+	/// backend, and put it in tickets, so that the relays will know how to forward traffic from
+	/// clients to your server.  See SteamDatagramRelayAuthTicket for more info.
 	///
-	/// NOTE: this just returns the value of the environment variable SDR_LISTEN_PORT,
-	///       so you can simulate a server running in a Valve data server by launching the process
-	///       with this environment variable set.
-	virtual uint16 GetHostedDedicatedServerListenPort() = 0;
+	/// NOTE ABOUT DEVELOPMENT ENVIRONMENTS:
+	/// In production in our data centers, these parameters are configured via environment variables.
+	/// In development, the only one you need to set is SDR_LISTEN_PORT, which is the local port you
+	/// want to listen on.  Furthermore, if you are running your server behind a corporate firewall,
+	/// you probably will not be able to put the routing information returned by this function into
+	/// tickets.   Instead, it should be a public internet address that the relays can use to send
+	/// data to your server.  So you might just end up hardcoding a public address and setup port
+	/// forwarding on your corporate firewall.  In that case, the port you put into the ticket
+	/// needs to be the public-facing port opened on your firewall, if it is different from the
+	/// actual server port.  In a development environment, the POPID will be zero, and that's OK
+	/// and what you should put into the ticket.
+	///
+	/// Returns false if the SDR_LISTEN_PORT environment variable is not set.
+	virtual bool GetHostedDedicatedServerInfo( SteamDatagramServiceNetID *pRouting, SteamNetworkingPOPID *pPopID ) = 0;
 
 	/// Create a listen socket on the specified virtual port.  The physical UDP port to use
-	/// will be determined by the SDR_LISTEN_PORT environment variable, e.g. the return value of
-	/// GetHostedDedicatedServerListenPort().  If a UDP port is not configured, this call will
-	/// fail.
+	/// will be determined by the SDR_LISTEN_PORT environment variable.  If a UDP port is not
+	/// configured, this call will fail.
 	///
 	/// Note that this call MUST be made through the SteamNetworkingSocketsGameServer() interface
 	virtual HSteamListenSocket CreateHostedDedicatedServerListenSocket( int nVirtualPort ) = 0;
@@ -393,7 +401,7 @@ STEAMNETWORKINGSOCKETS_INTERFACE void GameNetworkingSockets_Kill();
 	typedef void ( S_CALLTYPE *FSteamAPI_RegisterCallResult)( class CCallbackBase *pCallback, SteamAPICall_t hAPICall );
 	typedef void ( S_CALLTYPE *FSteamAPI_UnregisterCallResult)( class CCallbackBase *pCallback, SteamAPICall_t hAPICall );
 	STEAMNETWORKINGSOCKETS_INTERFACE void SteamDatagramClient_Internal_SteamAPIKludge( FSteamAPI_RegisterCallback fnRegisterCallback, FSteamAPI_UnregisterCallback fnUnregisterCallback, FSteamAPI_RegisterCallResult fnRegisterCallResult, FSteamAPI_UnregisterCallResult fnUnregisterCallResult );
-	STEAMNETWORKINGSOCKETS_INTERFACE bool SteamDatagramClient_Init_InternalV4( int iPartnerMask, SteamDatagramErrMsg &errMsg, FSteamInternal_CreateInterface fnCreateInterface, HSteamUser hSteamUser, HSteamPipe hSteamPipe );
+	STEAMNETWORKINGSOCKETS_INTERFACE bool SteamDatagramClient_Init_InternalV5( int iPartnerMask, SteamDatagramErrMsg &errMsg, FSteamInternal_CreateInterface fnCreateInterface, HSteamUser hSteamUser, HSteamPipe hSteamPipe );
 	STEAMNETWORKINGSOCKETS_INTERFACE bool SteamDatagramServer_Init_Internal( SteamDatagramErrMsg &errMsg, FSteamInternal_CreateInterface fnCreateInterface, HSteamUser hSteamUser, HSteamPipe hSteamPipe );
 
 /////////////////////////////////////////////////////////////////////////////
@@ -403,7 +411,7 @@ STEAMNETWORKINGSOCKETS_INTERFACE void GameNetworkingSockets_Kill();
 inline bool SteamDatagramClient_Init( int iPartnerMask, SteamDatagramErrMsg &errMsg )
 {
 	SteamDatagramClient_Internal_SteamAPIKludge( &::SteamAPI_RegisterCallback, &::SteamAPI_UnregisterCallback, &::SteamAPI_RegisterCallResult, &::SteamAPI_UnregisterCallResult );
-	return SteamDatagramClient_Init_InternalV4( iPartnerMask, errMsg, ::SteamInternal_CreateInterface, ::SteamAPI_GetHSteamUser(), ::SteamAPI_GetHSteamPipe() );
+	return SteamDatagramClient_Init_InternalV5( iPartnerMask, errMsg, ::SteamInternal_CreateInterface, ::SteamAPI_GetHSteamUser(), ::SteamAPI_GetHSteamPipe() );
 }
 
 /// Shutdown all clients and close all sockets
@@ -422,6 +430,13 @@ STEAMNETWORKINGSOCKETS_INTERFACE void SteamDatagramServer_Kill( );
 #endif
 
 /// Callback struct used to notify when a connection has changed state
+#if defined( VALVE_CALLBACK_PACK_SMALL )
+#pragma pack( push, 4 )
+#elif defined( VALVE_CALLBACK_PACK_LARGE )
+#pragma pack( push, 8 )
+#else
+#error "Must define VALVE_CALLBACK_PACK_SMALL or VALVE_CALLBACK_PACK_LARGE"
+#endif
 struct SteamNetConnectionStatusChangedCallback_t
 { 
 	enum { k_iCallback = k_iSteamNetworkingCallbacks + 9 }; // Pretty sure this ID is available.  It will probably change later
@@ -429,6 +444,7 @@ struct SteamNetConnectionStatusChangedCallback_t
 	SteamNetConnectionInfo_t m_info;	//< Full connection info
 	int m_eOldState;					//< ESNetSocketState.  (Current stats is in m_info)
 };
+#pragma pack( pop )
 
 /// TEMP callback dispatch mechanism.
 /// You'll override this guy and hook any callbacks you are interested in,
@@ -457,6 +473,7 @@ enum ESteamNetworkingSocketsDebugOutputType
 	k_ESteamNetworkingSocketsDebugOutputType_Msg, // Recommended amount
 	k_ESteamNetworkingSocketsDebugOutputType_Verbose, // Quite a bit
 	k_ESteamNetworkingSocketsDebugOutputType_Debug, // Practically everything
+	k_ESteamNetworkingSocketsDebugOutputType_Everything, // Everything
 };
 
 /// Setup callback for debug output, and the desired verbosity you want.

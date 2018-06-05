@@ -9,6 +9,10 @@
 #ifdef _WIN32
 #pragma once
 #endif
+
+#ifndef __cplusplus
+#include <stdbool.h>
+#endif
 //lint -save -e1931 -e1927 -e1924 -e613 -e726
 
 // This header file defines the interface between the calling application and the code that
@@ -478,7 +482,7 @@ enum ELaunchOptionType
 //-----------------------------------------------------------------------------
 // Purpose: true if this launch option is any of the vr launching types
 //-----------------------------------------------------------------------------
-static inline bool BIsVRLaunchOptionType( const ELaunchOptionType  eType )
+static inline bool BIsVRLaunchOptionType( const enum ELaunchOptionType eType )
 {
 	return eType == k_ELaunchOptionType_OpenVR 
 		|| eType == k_ELaunchOptionType_OpenVROverlay 
@@ -514,7 +518,7 @@ enum EVRHMDType
 //-----------------------------------------------------------------------------
 // Purpose: true if this is from an Oculus HMD
 //-----------------------------------------------------------------------------
-static inline bool BIsOculusHMD( EVRHMDType eType )
+static inline bool BIsOculusHMD( enum EVRHMDType eType )
 {
 	return eType == k_eEVRHMDType_Oculus_DK1 || eType == k_eEVRHMDType_Oculus_DK2 || eType == k_eEVRHMDType_Oculus_Rift || eType == k_eEVRHMDType_Oculus_Unknown;
 }
@@ -523,12 +527,12 @@ static inline bool BIsOculusHMD( EVRHMDType eType )
 //-----------------------------------------------------------------------------
 // Purpose: true if this is from an Vive HMD
 //-----------------------------------------------------------------------------
-static inline bool BIsViveHMD( EVRHMDType eType )
+static inline bool BIsViveHMD( enum EVRHMDType eType )
 {
 	return eType == k_eEVRHMDType_HTC_Dev || eType == k_eEVRHMDType_HTC_VivePre || eType == k_eEVRHMDType_HTC_Vive || eType == k_eEVRHMDType_HTC_Unknown;
 }
 
-
+#ifdef __cplusplus
 #pragma pack( push, 1 )
 
 #define CSTEAMID_DEFINED
@@ -1217,6 +1221,7 @@ private:
 };
 
 #pragma pack( pop )
+#endif
 
 const int k_cchGameExtraInfoMax = 64;
 
@@ -1240,5 +1245,44 @@ typedef void (*PFNPreMinidumpCallback)(void *context);
 //-----------------------------------------------------------------------------
 typedef void *BREAKPAD_HANDLE;
 #define BREAKPAD_INVALID_HANDLE (BREAKPAD_HANDLE)0 
+
+// Define compile time assert macros to let us validate the structure sizes.
+#define VALVE_COMPILE_TIME_ASSERT( pred ) typedef char compile_time_assert_type[(pred) ? 1 : -1];
+#if defined(__linux__) || defined(__APPLE__) 
+// The 32-bit version of gcc has the alignment requirement for uint64 and double set to
+// 4 meaning that even with #pragma pack(8) these types will only be four-byte aligned.
+// The 64-bit version of gcc has the alignment requirement for these types set to
+// 8 meaning that unless we use #pragma pack(4) our structures will get bigger.
+// The 64-bit structure packing has to match the 32-bit structure packing for each platform.
+#define VALVE_CALLBACK_PACK_SMALL
+#else
+#define VALVE_CALLBACK_PACK_LARGE
+#endif
+#if defined( VALVE_CALLBACK_PACK_SMALL )
+#pragma pack( push, 4 )
+#elif defined( VALVE_CALLBACK_PACK_LARGE )
+#pragma pack( push, 8 )
+#else
+#error ???
+#endif 
+
+typedef struct ValvePackingSentinel_t
+{
+    uint32 m_u32;
+    uint64 m_u64;
+    uint16 m_u16;
+    double m_d;
+} ValvePackingSentinel_t;
+
+#pragma pack( pop )
+
+
+#if defined(VALVE_CALLBACK_PACK_SMALL)
+VALVE_COMPILE_TIME_ASSERT( sizeof(ValvePackingSentinel_t) == 24 )
+#elif defined(VALVE_CALLBACK_PACK_LARGE)
+VALVE_COMPILE_TIME_ASSERT( sizeof(ValvePackingSentinel_t) == 32 )
+#else
+#error ???
+#endif
 
 #endif // STEAMCLIENTPUBLIC_H

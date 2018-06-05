@@ -11,13 +11,23 @@
 #endif
 
 #include "steamnetworkingsockets_config.h"
-#include "steam/steamtypes.h"
-#include "steam/steamclientpublic.h"
+#include <steam/steamtypes.h>
+#include <steam/steamclientpublic.h>
 
+#if defined( VALVE_CALLBACK_PACK_SMALL )
+#pragma pack( push, 4 )
+#elif defined( VALVE_CALLBACK_PACK_LARGE )
 #pragma pack( push, 8 )
+#else
+#error "Must define VALVE_CALLBACK_PACK_SMALL or VALVE_CALLBACK_PACK_LARGE"
+#endif
 
 struct SteamNetworkPingLocation_t;
-class ISteamNetworkingMessage;
+struct SteamDatagramRelayAuthTicket;
+struct SteamDatagramServiceNetID;
+struct SteamNetConnectionStatusChangedCallback_t;
+struct P2PSessionRequest_t;
+struct P2PSessionConnectFail_t;
 
 /// Handle used to identify a connection to a remote host.
 typedef uint32 HSteamNetConnection;
@@ -207,13 +217,14 @@ inline SteamNetworkingPOPID CalculateSteamNetworkingPOPIDFromString( const char 
 	// this nontrivial, and there are already some IDs stored in SQL.  Ug, so the 4 character code "abcd" will
 	// be encoded with the digits like "0xddaabbcc"
 	return
-		( uint32(pszCode[3]) << 24U ) 
-		| ( uint32(pszCode[0]) << 16U ) 
-		| ( uint32(pszCode[1]) << 8U )
-		| uint32(pszCode[2]);
+		( (uint32)(pszCode[3]) << 24U ) 
+		| ((uint32)(pszCode[0]) << 16U ) 
+		| ((uint32)(pszCode[1]) << 8U )
+		| (uint32)(pszCode[2]);
 }
 
 /// Unpack integer to string representation, including terminating '\0'
+#ifdef __cplusplus
 template <int N>
 inline void GetSteamNetworkingLocationPOPStringFromID( SteamNetworkingPOPID id, char (&szCode)[N] )
 {
@@ -224,6 +235,7 @@ inline void GetSteamNetworkingLocationPOPStringFromID( SteamNetworkingPOPID id, 
 	szCode[3] = ( id >> 24U ); // See comment above about deep regret and sadness
 	szCode[4] = 0;
 }
+#endif
 
 /// A local timestamp.  You can subtract two timestamps to get the number of elapsed
 /// microseconds.  This is guaranteed to increase over time during the lifetime
@@ -232,35 +244,19 @@ inline void GetSteamNetworkingLocationPOPStringFromID( SteamNetworkingPOPID id, 
 /// microsecond *resolution*.
 typedef int64 SteamNetworkingMicroseconds;
 
-// maximum amount of pending buffered messages allows
-const int k_cbMaxSteamDatagramMessageSize = 512 * 1024;
+/// Max size of a single message that we can SEND.
+/// Note: We might be wiling to receive larger messages,
+/// and our peer might, too.
+const int k_cbMaxSteamNetworkingSocketsMessageSizeSend = 512 * 1024;
 
-/// A message that has been received.
-class ISteamNetworkingMessage
+/// Message that has been received
+typedef struct _SteamNetworkingMessage_t
 {
-public:	
 
-	/// You MUST call this when you're done with the object,
-	/// to free up memory, etc.
-	virtual void Release() = 0;
+	/// SteamID that sent this to us.
+	CSteamID m_steamIDSender;
 
-	/// Get size of the payload.
-	inline uint32 GetSize() const { return m_cbSize; }
-
-	/// Get message payload
-	inline const void *GetData() const { return m_pData; }
-
-	/// Return SteamID that sent this to us.
-	inline CSteamID GetSenderSteamID() const { return m_steamIDSender; }
-
-	/// Return the channel number the message was received on.
-	/// (Not used for messages received on "connections"
-	inline int GetChannel() const { return m_nChannel; }
-
-	/// The socket this came from.  (Not used when using the P2P calls)
-	inline HSteamNetConnection GetConnection() const { return m_conn; }
-
-	/// Get the user data associated with the connection.
+	/// The user data associated with the connection.
 	///
 	/// This is *usually* the same as calling GetConnection() and then
 	/// fetching the user data associated with that connection, but for
@@ -273,22 +269,57 @@ public:
 	/// - This is an inline call, so it's *much* faster.
 	/// - You might have closed the connection, so fetching the user data
 	///   would not be possible.
-	inline int64 GetConnectionUserData() const { return m_nConnUserData; }
-
-	/// Get the time that it was received
-	inline SteamNetworkingMicroseconds GetTimeReceived() const { return m_usecTimeReceived; }
-
-protected:
-	CSteamID m_steamIDSender;
-	void *m_pData;
-	uint32 m_cbSize;
-	int m_nChannel;
-	HSteamNetConnection m_conn;
 	int64 m_nConnUserData;
+
+	/// Local timestamps when it was received
 	SteamNetworkingMicroseconds m_usecTimeReceived;
 
-	inline ~ISteamNetworkingMessage() {} // Destructor hidden - use Release()!  But make it inline and empty, in case you want to derive your own type that satisfies this interface for use in your code.
-};
+	/// Message number assigned by the sender
+	int64 m_nMessageNumber;
+
+	/// Function used to clean up this object.  Normally you won't call
+	/// this directly, use Release() instead.
+	void (*m_pfnRelease)( struct _SteamNetworkingMessage_t *msg );
+
+	/// Message payload
+	void *m_pData;
+
+	/// Size of the payload.
+	uint32 m_cbSize;
+
+	/// The connection this came from.  (Not used when using the P2P calls)
+	HSteamNetConnection m_conn;
+
+	/// The channel number the message was received on.
+	/// (Not used for messages received on "connections")
+	int m_nChannel;
+
+	/// Pad to multiple of 8 bytes
+	int m___nPadDummy;
+
+	#ifdef __cplusplus
+
+		/// You MUST call this when you're done with the object,
+		/// to free up memory, etc.
+		inline void Release()
+		{
+			m_pfnRelease( this );
+		}
+
+		// For code compatibility, some accessors
+		inline uint32 GetSize() const { return m_cbSize; }
+		inline const void *GetData() const { return m_pData; }
+		inline CSteamID GetSenderSteamID() const { return m_steamIDSender; }
+		inline int GetChannel() const { return m_nChannel; }
+		inline HSteamNetConnection GetConnection() const { return m_conn; }
+		inline int64 GetConnectionUserData() const { return m_nConnUserData; }
+		inline SteamNetworkingMicroseconds GetTimeReceived() const { return m_usecTimeReceived; }
+		inline int64 GetMessageNumber() const { return m_nMessageNumber; }
+	#endif
+} SteamNetworkingMessage_t;
+
+// For code compatibility
+typedef SteamNetworkingMessage_t ISteamNetworkingMessage;
 
 /// Object that describes a "location" on the Internet with sufficient
 /// detail that we can reasonably estimate an upper bound on the ping between
@@ -299,13 +330,19 @@ protected:
 /// networking characteristics, then it's valid to use the same location
 /// object for both of them.
 ///
-/// NOTE: This object should only be used in memory.  If you need to persist
-/// it or send it over the wire, convert it to a string representation using
-/// the methods in ISteamNetworkingUtils()
+/// NOTE: This object should only be used in the same process!  Do not serialize it,
+/// send it over the wire, or persist it in a file or database!  If you need
+/// to do that, convert it to a string representation using the methods in
+/// ISteamNetworkingUtils().
 struct SteamNetworkPingLocation_t
 {
-	uint8 m_data[ 64 ];
+	uint8 m_data[ 256 ];
 };
+
+/// Max possible length of a ping location, in string format.  This is quite
+/// generous worst case and leaves room for future syntax enhancements.
+/// Most strings are a lot shorter.
+const int k_cchMaxSteamNetworkingPingLocationString = 512;
 
 /// Special values that are returned by some functions that return a ping.
 const int k_nSteamNetworkingPing_Failed = -1;
@@ -605,92 +642,86 @@ struct SteamNetworkingQuickConnectionStatus
 /// of various subsystems 
 enum ESteamNetworkingConfigurationValue
 {
-	// 0-100 Randomly discard N pct of unreliable messages instead of sending
-	// Defaults to 0 (no loss).
-	k_ESteamNetworkingConfigurationValue_FakeMessageLoss_Send = 1,
+	/// 0-100 Randomly discard N pct of unreliable messages instead of sending
+	/// Defaults to 0 (no loss).
+	k_ESteamNetworkingConfigurationValue_FakeMessageLoss_Send = 0,
 
-	// 0-100 Randomly discard N pct of unreliable messages upon receive
-	// Defaults to 0 (no loss).
-	k_ESteamNetworkingConfigurationValue_FakeMessageLoss_Recv = 2,
+	/// 0-100 Randomly discard N pct of unreliable messages upon receive
+	/// Defaults to 0 (no loss).
+	k_ESteamNetworkingConfigurationValue_FakeMessageLoss_Recv = 1,
 
-	// 0-100 Randomly discard N pct of packets instead of sending
-	k_ESteamNetworkingConfigurationValue_FakePacketLoss_Send = 3,
+	/// 0-100 Randomly discard N pct of packets instead of sending
+	k_ESteamNetworkingConfigurationValue_FakePacketLoss_Send = 2,
 
-	// 0-100 Randomly discard N pct of packets received
-	k_ESteamNetworkingConfigurationValue_FakePacketLoss_Recv = 4,
+	/// 0-100 Randomly discard N pct of packets received
+	k_ESteamNetworkingConfigurationValue_FakePacketLoss_Recv = 3,
 
-	// Set to true (non-zero) to open up a seperate debug window showing SNP 
-	// state for all current connections.  Only works on Windows.
-	// Defaults to 0 (off)
-	k_ESteamNetworkingConfigurationValue_SNP_DebugWindow = 5,
+	/// Globally delay all outbound packets by N ms before sending
+	k_ESteamNetworkingConfigurationValue_FakePacketLag_Send = 4,
 
-	// Upper limit of buffered pending bytes to be sent, if this is reached
-	// SendMessage will return k_EResultLimitExceeded
-	// Default is 512k (524288 bytes)
-	k_ESteamNetworkingConfigurationValue_SNP_SendBufferSize = 6,
+	/// Globally delay all received packets by N ms before processing
+	k_ESteamNetworkingConfigurationValue_FakePacketLag_Recv = 5,
 
-	// Maximum send rate clamp, 0 is no limit
-	// This value will control the maximum allowed sending rate that congestion 
-	// is allowed to reach.  Default is 0 (no-limit)
-	k_ESteamNetworkingConfigurationValue_SNP_MaxRate = 7,
+	/// Globally reorder some percentage of packets we send
+	k_ESteamNetworkingConfigurationValue_FakePacketReorder_Send = 6,
 
-	// Minimum send rate clamp, 0 is no limit
-	// This value will control the minimum allowed sending rate that congestion 
-	// is allowed to reach.  Default is 0 (no-limit)
-	k_ESteamNetworkingConfigurationValue_SNP_MinRate = 8,
+	/// Globally reorder some percentage of packets we receive
+	k_ESteamNetworkingConfigurationValue_FakePacketReorder_Recv = 7,
 
-	// Set the nagle timer.  When SendMessage is called, if the outgoing message 
-	// is less than the size of the MTU, it will be queued for a delay equal to 
-	// the Nagle timer value.  This is to ensure that if the application sends
-	// several small messages rapidly, they are coalesced into a single packet.
-	// See historical RFC 896.  Value is in microseconds. 
-	// Default is 5000us (5ms).
-	k_ESteamNetworkingConfigurationValue_SNP_Nagle_Time = 9,
+	/// Amount of delay, in ms, to apply to reordered packets.
+	k_ESteamNetworkingConfigurationValue_FakePacketReorder_Time = 8,
 
-	// Set to true (non-zero) to enable logging of SNP RTT
-	// Default is 0 (off)
-	k_ESteamNetworkingConfigurationValue_SNP_Log_RTT = 10,
+	/// Upper limit of buffered pending bytes to be sent, if this is reached
+	/// SendMessage will return k_EResultLimitExceeded
+	/// Default is 512k (524288 bytes)
+	k_ESteamNetworkingConfigurationValue_SendBufferSize = 9,
 
-	// Set to true (non-zero) to enable logging of SNP Packet
-	// Default is 0 (off)
-	k_ESteamNetworkingConfigurationValue_SNP_Log_Packet = 11,
+	/// Maximum send rate clamp, 0 is no limit
+	/// This value will control the maximum allowed sending rate that congestion 
+	/// is allowed to reach.  Default is 0 (no-limit)
+	k_ESteamNetworkingConfigurationValue_MaxRate = 10,
 
-	// Set to true (non-zero) to enable logging of SNP Segments
-	// Default is 0 (off)
-	k_ESteamNetworkingConfigurationValue_SNP_Log_Segments = 12,
+	/// Minimum send rate clamp, 0 is no limit
+	/// This value will control the minimum allowed sending rate that congestion 
+	/// is allowed to reach.  Default is 0 (no-limit)
+	k_ESteamNetworkingConfigurationValue_MinRate = 11,
 
-	// Set to true (non-zero) to enable logging of SNP Feedback
-	// Default is 0 (off)
-	k_ESteamNetworkingConfigurationValue_SNP_Log_Feedback = 13,
+	/// Set the nagle timer.  When SendMessage is called, if the outgoing message 
+	/// is less than the size of the MTU, it will be queued for a delay equal to 
+	/// the Nagle timer value.  This is to ensure that if the application sends
+	/// several small messages rapidly, they are coalesced into a single packet.
+	/// See historical RFC 896.  Value is in microseconds. 
+	/// Default is 5000us (5ms).
+	k_ESteamNetworkingConfigurationValue_Nagle_Time = 12,
 
-	// Set to true (non-zero) to enable logging of SNP Relible
-	// Default is 0 (off)
-	k_ESteamNetworkingConfigurationValue_SNP_Log_Reliable = 14,
-	
-	// Set to true (non-zero) to enable logging of SNP Messages
-	// Default is 0 (off)
-	k_ESteamNetworkingConfigurationValue_SNP_Log_Message = 15,
+	/// Set to true (non-zero) to enable logging of RTT's based on acks.
+	/// This doesn't track all sources of RTT, just the inline ones based
+	/// on acks, but those are the most common
+	k_ESteamNetworkingConfigurationValue_LogLevel_AckRTT = 13,
 
-	// Set to true (non-zero) to enable logging of SNP Loss
-	// Default is 0 (off)
-	k_ESteamNetworkingConfigurationValue_SNP_Log_Loss = 16,
+	/// Log level of SNP packet decoding
+	k_ESteamNetworkingConfigurationValue_LogLevel_Packet = 14,
 
-	// Set to true (non-zero) to enable logging of SNP Throughput
-	// Default is 0 (off)
-	k_ESteamNetworkingConfigurationValue_SNP_Log_X = 17,
+	/// Log when messages are sent/received
+	k_ESteamNetworkingConfigurationValue_LogLevel_Message = 15,
 
-	// Set to true (non-zero) to enable logging of Nagle timing
-	// Default is 0 (off)
-	k_ESteamNetworkingConfigurationValue_SNP_Log_Nagle = 18,
+	/// Log level when individual packets drop
+	k_ESteamNetworkingConfigurationValue_LogLevel_PacketGaps = 16,
 
-	// If the first N pings to a port all fail, mark that port as unavailable for
-	// a while, and try a different one.  Some ISPs and routers may drop the first
-	// packet, so setting this to 1 may greatly disrupt communications.
+	/// Log level for P2P rendezvous.
+	k_ESteamNetworkingConfigurationValue_LogLevel_P2PRendezvous = 17,
+
+	/// Log level for sending and receiving pings to relays
+	k_ESteamNetworkingConfigurationValue_LogLevel_RelayPings = 18,
+
+	/// If the first N pings to a port all fail, mark that port as unavailable for
+	/// a while, and try a different one.  Some ISPs and routers may drop the first
+	/// packet, so setting this to 1 may greatly disrupt communications.
 	k_ESteamNetworkingConfigurationValue_ClientConsecutitivePingTimeoutsFailInitial = 19,
 
-	// If N consecutive pings to a port fail, after having received successful 
-	// communication, mark that port as unavailable for a while, and try a 
-	// different one.
+	/// If N consecutive pings to a port fail, after having received successful 
+	/// communication, mark that port as unavailable for a while, and try a 
+	/// different one.
 	k_ESteamNetworkingConfigurationValue_ClientConsecutitivePingTimeoutsFail = 20,
 
 	/// Minimum number of lifetime pings we need to send, before we think our estimate
@@ -700,43 +731,28 @@ enum ESteamNetworkingConfigurationValue
 	/// many pings.
 	k_ESteamNetworkingConfigurationValue_ClientMinPingsBeforePingAccurate = 21,
 
-	// Set all steam datagram traffic to originate from the same local port.  
-	// By default, we open up a new UDP socket (on a different local port) 
-	// for each relay.  This is not optimal, but it works around some 
-	// routers that don't implement NAT properly.  If you have intermittent 
-	// problems talking to relays that might be NAT related, try toggling 
-	// this flag
+	/// Set all steam datagram traffic to originate from the same local port.  
+	/// By default, we open up a new UDP socket (on a different local port) 
+	/// for each relay.  This is not optimal, but it works around some 
+	/// routers that don't implement NAT properly.  If you have intermittent 
+	/// problems talking to relays that might be NAT related, try toggling 
+	/// this flag
 	k_ESteamNetworkingConfigurationValue_ClientSingleSocket = 22,
 
-	// Globally delay all outbound packets by N ms before sending
-	k_ESteamNetworkingConfigurationValue_FakePacketLag_Send = 23,
+	/// Don't automatically fail IP connections that don't have strong auth.
+	/// On clients, this means we will attempt the connection even if we don't
+	/// know our SteamID or can't get a cert.  On the server, it means that we won't
+	/// automatically reject a connection due to a failure to authenticate.
+	/// (You can examine the incoming connection and decide whether to accept it.)
+	k_ESteamNetworkingConfigurationValue_IP_Allow_Without_Auth = 23,
 
-	// Globally delay all received packets by N ms before processing
-	k_ESteamNetworkingConfigurationValue_FakePacketLag_Recv = 24,
+	/// Timeout value (in seconds) to use when first connecting
+	k_ESteamNetworkingConfigurationValue_Timeout_Seconds_Initial = 24,
 
-	// Don't automatically fail IP connections that don't have strong auth.
-	// On clients, this means we will attempt the connection even if we don't
-	// know our SteamID or can't get a cert.  On the server, it means that we won't
-	// automatically reject a connection due to a failure to authenticate.
-	// (You can examine the incoming connection and decide whether to accept it.)
-	k_ESteamNetworkingConfigurationValue_IP_Allow_Without_Auth = 25,
+	/// Timeout value (in seconds) to use after connection is established
+	k_ESteamNetworkingConfigurationValue_Timeout_Seconds_Connected = 25,
 
-	// Timeout value (in seconds) to use when first connecting
-	k_ESteamNetworkingConfigurationValue_Timeout_Seconds_Initial = 26,
-
-	// Timeout value (in seconds) to use after connection is established
-	k_ESteamNetworkingConfigurationValue_Timeout_Seconds_Connected = 27,
-
-	// Globally reorder some percentage of packets we send
-	k_ESteamNetworkingConfigurationValue_FakePacketReorder_Send = 28,
-
-	// Globally reorder some percentage of packets we receive
-	k_ESteamNetworkingConfigurationValue_FakePacketReorder_Recv = 29,
-
-	// Amount of delay, in ms, to apply to reordered packets.
-	k_ESteamNetworkingConfigurationValue_FakePacketReorder_Time = 30,
-
-	// Number of k_ESteamNetworkingConfigurationValue defines
+	/// Number of k_ESteamNetworkingConfigurationValue defines
 	k_ESteamNetworkingConfigurationValue_Count,
 };
 
